@@ -1,0 +1,28 @@
+{
+    "id": "battle_net",
+    "name": "Battle.net",
+    "version": "1.0.0",
+    "platform": "battle_net",
+    "author": "RobbyRatpoison",
+    "source": "github:RobbyRatpoison/playdate-plugin-battle-net",
+    "launcher": {
+        "required": true,
+        "name": "Battle.net",
+        "exe_name": "Agent.exe",
+        "installer": {
+            "url": "https://www.battle.net/download/getInstallerForGame?os=win&locale=enUS&version=LIVE&gameProgram=BATTLENET_APP",
+            "type": "exe",
+            "winearch": "win64",
+            "win_version": "win10",
+            "winetricks": [
+                "vcrun2022",
+                "corefonts"
+            ]
+        }
+    },
+    "platform_status": {
+        "windows": "untested",
+        "linux": "broken",
+        "mac": "untested"
+    }
+}
