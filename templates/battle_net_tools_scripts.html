@@ -2,8 +2,33 @@
 
 let _bnetSyncPollInterval = null;
 
+async function battlenetStartLauncher() {
+    const btn = document.querySelector('button[onclick="battlenetStartLauncher()"]');
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+    try {
+        const r = await fetch('/api/battle_net/start-launcher', { method: 'POST' });
+        const d = await r.json();
+        if (btn) btn.textContent = d.status === 'success' ? 'Started' : (d.message || 'Failed');
+    } catch (e) {
+        if (btn) btn.textContent = 'Failed';
+    } finally {
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = 'Start Launcher'; } }, 3000);
+    }
+}
+
+async function battlenetOpenFolder() {
+    const st = document.getElementById('battle_net-manage-status-folder');
+    try {
+        const r = await fetch('/api/battle_net/open-folder', { method: 'POST' });
+        const d = await r.json();
+        if (d.status !== 'ok' && st) st.textContent = d.message || 'Failed to open folder';
+    } catch (e) {
+        if (st) st.textContent = 'Network error';
+    }
+}
+
 function _bnetSyncStatusText(d) {
-    if (d.phase === 'fetching_library') return 'Fetching library...';
+    if (d.phase === 'scanning') return 'Scanning launcher files...';
     if (d.phase === 'processing') {
         const game = d.current_game ? `: ${d.current_game}` : '';
         const pct  = d.total > 0 ? ` (${d.done}/${d.total})` : '';
@@ -72,35 +97,15 @@ function _bnetStartSyncPoll(st) {
                 if (d.phase === 'error') return;
                 const newGames = d.new_games || 0, total = d.total_games || 0;
                 const stopped  = d.phase === 'stopped';
-                const parts    = [`${newGames} new game${newGames !== 1 ? 's' : ''} (${total} total)`];
                 const prefix = stopped ? 'Stopped' : 'Done';
-                if (st) { st.style.color = 'var(--accent-positive, #5c7e10)'; st.textContent = `${prefix} — ${parts.join(', ')}`; }
+                if (st) {
+                    st.style.color = 'var(--accent-positive, #5c7e10)';
+                    st.textContent = `${prefix} — ${newGames} new game${newGames !== 1 ? 's' : ''} (${total} total)`;
+                }
                 if (newGames > 0) setTimeout(() => location.reload(), 2000);
             }
         } catch (_) {}
     }, 1000);
-}
-
-function battlenetSetCredentials() {
-    const clientId = prompt('Enter your Battle.net Client ID\n(from develop.battle.net → Client ID):');
-    if (!clientId || !clientId.trim()) return;
-    const clientSecret = prompt('Enter your Battle.net Client Secret\n(leave blank if your client has no secret):');
-    if (clientSecret === null) return;
-    fetch('/api/battle_net/save-credentials', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_id: clientId.trim(), client_secret: (clientSecret || '').trim() })
-    }).then(r => r.json()).then(d => {
-        if (d.status === 'success') {
-            // Reload the manage modal to reflect new credential state
-            const modal = document.getElementById('battle_net-manage-modal');
-            if (modal && typeof _buildManageModal === 'function') {
-                _buildManageModal('battle_net');
-            } else {
-                location.reload();
-            }
-        }
-    }).catch(() => {});
 }
 
 function _bnetResumePolling() {

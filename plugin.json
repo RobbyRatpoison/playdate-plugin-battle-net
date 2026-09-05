@@ -1,7 +1,8 @@
 {
     "id": "battle_net",
     "name": "Battle.net",
-    "version": "1.0.0",
+    "version": "1.1.0",
+    "min_core_version": "1.10.2",
     "platform": "battle_net",
     "author": "RobbyRatpoison",
     "source": "github:RobbyRatpoison/playdate-plugin-battle-net",
@@ -17,12 +18,17 @@
             "winetricks": [
                 "vcrun2022",
                 "corefonts"
-            ]
+            ],
+            "exe_name": "Battle.net.exe",
+            "detached_launcher": true
         }
     },
     "platform_status": {
         "windows": "untested",
-        "linux": "broken",
+        "linux": "working",
         "mac": "untested"
+    },
+    "notes": {
+        "linux": "Library sync, install, launch, and uninstall all confirmed working via Wine. Local sync (installed games + owned paid games) needs no login; connecting the account adds the authoritative owned list on top."
     }
 }

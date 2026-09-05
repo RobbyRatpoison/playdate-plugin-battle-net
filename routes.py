@@ -1,6 +1,7 @@
 import logging
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify, request
+
 from database import update_game_data
 
 log = logging.getLogger(__name__)
@@ -11,68 +12,31 @@ bp = Blueprint('battle_net', __name__, url_prefix='/api/battle_net',
 
 @bp.route('/status')
 def bnet_status():
-    from .battle_net import is_connected, get_display_name, credentials_configured
-    return jsonify({
-        'connected':              is_connected(),
-        'username':               get_display_name(),
-        'credentials_configured': credentials_configured(),
-    })
-
-
-@bp.route('/credentials-status')
-def bnet_credentials_status():
-    from .battle_net import credentials_configured, load_credentials
-    if credentials_configured():
-        creds = load_credentials()
-        return jsonify({'text': f'Client ID: {creds["client_id"]}', 'color': 'var(--accent-positive, #5c7e10)'})
-    return jsonify({'text': 'No credentials configured', 'color': 'var(--text-secondary)'})
-
-
-@bp.route('/save-credentials', methods=['POST'])
-def bnet_save_credentials():
-    data          = request.json or {}
-    client_id     = (data.get('client_id') or '').strip()
-    client_secret = (data.get('client_secret') or '').strip()
-    if not client_id:
-        return jsonify({'status': 'error', 'message': 'client_id is required'}), 400
-    from .battle_net import save_credentials
-    save_credentials(client_id, client_secret)
-    return jsonify({'status': 'success'})
-
-
-@bp.route('/auth-url')
-def bnet_auth_url():
-    from .battle_net import get_auth_url, credentials_configured
-    if not credentials_configured():
-        return jsonify({'error': 'credentials not configured'}), 400
-    url = get_auth_url()
-    return jsonify({'url': url})
-
-
-@bp.route('/callback', methods=['POST'])
-def bnet_callback():
-    raw = ((request.json or {}).get('code') or '').strip()
-    if not raw:
-        return jsonify({'status': 'error', 'message': 'code is required'}), 400
-    from .battle_net import exchange_code
-    ok, result = exchange_code(raw)
-    if ok:
-        return jsonify({'status': 'success', 'username': result})
-    return jsonify({'status': 'error', 'message': result}), 400
-
-
-@bp.route('/disconnect', methods=['POST'])
-def bnet_disconnect():
-    from .battle_net import clear_bnet_tokens
-    clear_bnet_tokens()
-    return jsonify({'status': 'success'})
+    """Feeds the Manage modal's info line: whether the launcher is set up and
+    how many Battle.net games are in the library."""
+    from .battle_net import is_configured
+    from database import get_db
+    db = get_db()
+    try:
+        n = db.execute(
+            "SELECT COUNT(*) FROM games WHERE platform = 'battle_net'"
+        ).fetchone()[0]
+    finally:
+        db.close()
+    configured = is_configured()
+    if not configured:
+        text, color = 'Launcher not set up', 'var(--text-secondary)'
+    else:
+        text = f'{n} game{"s" if n != 1 else ""} in library'
+        color = 'var(--accent-positive, #5c7e10)'
+    return jsonify({'configured': configured, 'game_count': n,
+                    'text': text, 'color': color})
 
 
 @bp.route('/sync', methods=['POST'])
 def bnet_sync():
     from .battle_net import start_library_sync
-    result = start_library_sync()
-    return jsonify(result)
+    return jsonify(start_library_sync())
 
 
 @bp.route('/sync/status')
@@ -86,6 +50,71 @@ def bnet_sync_cancel():
     from .battle_net import cancel_library_sync
     cancel_library_sync()
     return jsonify({'status': 'ok'})
+
+
+@bp.route('/account/auth-url')
+def bnet_account_auth_url():
+    from .account import get_auth_url
+    return jsonify({'url': get_auth_url()})
+
+
+@bp.route('/account/callback', methods=['POST'])
+def bnet_account_callback():
+    raw = ((request.json or {}).get('code') or '').strip()
+    log.info('Battle.net account: /callback hit, payload %d chars', len(raw))
+    if not raw:
+        log.warning('Battle.net account: /callback hit with empty payload')
+        return jsonify({'status': 'error', 'message': 'No login session captured'}), 400
+    from .account import save_cookies
+    ok, result = save_cookies(raw)
+    if ok:
+        return jsonify({'status': 'success', 'username': result})
+    return jsonify({'status': 'error', 'message': result}), 400
+
+
+@bp.route('/account/status')
+def bnet_account_status():
+    from .account import is_connected, get_display_name
+    return jsonify({'connected': is_connected(), 'username': get_display_name()})
+
+
+@bp.route('/account/disconnect', methods=['POST'])
+def bnet_account_disconnect():
+    from .account import clear
+    clear()
+    return jsonify({'status': 'success'})
+
+
+@bp.route('/start-launcher', methods=['POST'])
+def bnet_start_launcher():
+    import plugins
+    plugin = plugins.get('battle_net')
+    if plugin is None:
+        return jsonify({'status': 'error', 'message': 'Plugin not loaded'}), 500
+    return jsonify(plugin.start_launcher())
+
+
+@bp.route('/open-folder', methods=['POST'])
+def bnet_open_folder():
+    import os
+    from .battle_net import get_prefix
+    from runners.installdir import open_folder
+    prefix = get_prefix()
+    if not prefix:
+        return jsonify({'status': 'error', 'message': 'No Wine prefix configured'}), 400
+    # No single "games" subfolder -- each Battle.net game installs as a
+    # sibling of Battle.net itself directly under Program Files (x86).
+    open_folder(os.path.join(prefix, 'drive_c', 'Program Files (x86)'))
+    return jsonify({'status': 'ok'})
+
+
+@bp.route('/uninstall/<int:appid>', methods=['POST'])
+def bnet_uninstall(appid):
+    import plugins
+    plugin = plugins.get('battle_net')
+    if plugin is None:
+        return jsonify({'status': 'error', 'message': 'Plugin not loaded'}), 500
+    return jsonify(plugin.uninstall_game(appid))
 
 
 @bp.route('/scrape-single/<int:appid>', methods=['POST'])

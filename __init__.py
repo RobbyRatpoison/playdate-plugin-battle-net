@@ -4,48 +4,93 @@ import sys
 
 log = logging.getLogger(__name__)
 
-# Product code -> battlenet:// protocol slug (some differ from the product code)
-_LAUNCH_SLUGS = {
-    'WoW':   'WoW',
-    'WoWC':  'WoW',       # Classic uses the same launcher, game selection inside
-    'WoWCE': 'WoW',
-    'D4':    'D4',
-    'D3':    'D3',
-    'D2':    'D2',
-    'D1':    'D1',
-    'OSI':   'OSI',
-    'S2':    'S2',
-    'S1':    'S1',
-    'SC':    'SC',
-    'HS1':   'HS1',
-    'W3':    'W3',
-    'W2':    'W2',
-    'W1':    'W1',
-    'Pro':   'Pro',
-    'WTCG':  'WTCG',
-    'Hero':  'Hero',
-    'Bots':  'Bots',
-    'VIPR':  'VIPR',
-    'ODIN':  'ODIN',
-    'LAZR':  'LAZR',
-    'FORE':  'FORE',
-    'ZEUS':  'ZEUS',
-    'WLBY':  'WLBY',
-}
-
 
 def _find_native_launcher():
-    if sys.platform == 'win32':
-        candidates = []
-        for env in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432'):
-            base = os.environ.get(env, '')
-            if base:
-                candidates.append(os.path.join(base, 'Battle.net', 'Battle.net.exe'))
-                candidates.append(os.path.join(base, 'Blizzard Entertainment', 'Battle.net', 'Battle.net.exe'))
-        for path in candidates:
-            if os.path.isfile(path):
-                return path
+    """Path to Battle.net.exe on Windows, or None."""
+    if sys.platform != 'win32':
+        return None
+    from runners.windows import find_installed_exe
+    exe = find_installed_exe('Battle.net', 'Battle.net.exe')
+    if exe:
+        return exe
+    # Fallback: standard install-path guesses, in case the registry entry
+    # is missing or named differently.
+    for env in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432'):
+        base = os.environ.get(env, '')
+        if base:
+            for p in (os.path.join(base, 'Battle.net', 'Battle.net.exe'),
+                      os.path.join(base, 'Blizzard Entertainment', 'Battle.net', 'Battle.net.exe')):
+                if os.path.isfile(p):
+                    return p
     return None
+
+
+def _find_launcher_exe(prefix):
+    """Absolute path to Battle.net.exe inside a Wine prefix, or None."""
+    if not prefix or not os.path.isdir(prefix):
+        return None
+    direct = os.path.join(prefix, 'drive_c', 'Program Files (x86)',
+                          'Battle.net', 'Battle.net.exe')
+    if os.path.isfile(direct):
+        return direct
+    for dirpath, _dirs, files in os.walk(prefix):
+        if 'Battle.net.exe' in files:
+            return os.path.join(dirpath, 'Battle.net.exe')
+    return None
+
+
+def _launcher_config():
+    import json
+    from config import CONFIG_PATH
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    lc = cfg.get('launchers', {}).get('battle_net', {})
+    prefix   = (lc.get('prefix') or '').strip()
+    wine_bin = (lc.get('wine_bin') or '').strip() or None
+    return prefix, wine_bin
+
+
+def _launch_via_client(prefix, wine_bin, code):
+    """Start an installed game through the Wine-installed Battle.net client.
+
+    `battlenet://<code>` only *selects* a game in the client -- it never starts
+    a play session -- so an installed game is launched with
+    `Battle.net.exe --exec="launch <code>"` instead. That command needs the
+    client already running and loaded, so a cold start warms it up on a
+    background thread first, then fires the launch (Playnite does the same).
+    """
+    import threading
+    from runners.wine import run_in_prefix, _prefix_has_running_process
+
+    exe = _find_launcher_exe(prefix)
+    if not exe:
+        raise RuntimeError('Battle.net.exe not found in the prefix -- reinstall the launcher.')
+
+    launch_arg = f'--exec=launch {code}'
+
+    if _prefix_has_running_process(prefix):
+        run_in_prefix(prefix, exe, args=[launch_arg], wine_bin=wine_bin,
+                      env_extra={'WINEDEBUG': '-all'})
+        return
+
+    def _cold_then_launch():
+        import time
+        try:
+            run_in_prefix(prefix, exe, wine_bin=wine_bin, env_extra={'WINEDEBUG': '-all'})
+            for _ in range(30):
+                time.sleep(1)
+                if _prefix_has_running_process(prefix):
+                    break
+            time.sleep(8)  # let the client UI finish loading before it'll take --exec
+            run_in_prefix(prefix, exe, args=[launch_arg], wine_bin=wine_bin,
+                          env_extra={'WINEDEBUG': '-all'})
+        except Exception as e:
+            log.error('Battle.net cold launch failed: %s', e, exc_info=True)
+
+    threading.Thread(target=_cold_then_launch, daemon=True).start()
 
 
 class BattleNetPlugin:
@@ -60,130 +105,183 @@ class BattleNetPlugin:
         log.info('Battle.net plugin registered')
 
     def on_startup(self):
-        from .watcher import sync_bnet_install_status, start_periodic_sync
+        from .watcher import sync_bnet_install_status, start_bnet_watcher
         try:
             sync_bnet_install_status()
-            log.info('Battle.net install status synced on startup')
         except Exception as e:
-            log.warning(f'Startup Battle.net install sync failed: {e}')
-        start_periodic_sync()
+            log.warning('Startup Battle.net install sync failed: %s', e)
+        prefix, _ = _launcher_config()
+        if prefix:
+            watch = os.path.join(prefix, 'drive_c', 'ProgramData', 'Battle.net', 'Agent')
+            try:
+                start_bnet_watcher(watch)
+            except Exception as e:
+                log.warning('Battle.net watcher start failed: %s', e)
 
     def resync_installed(self):
-        from .watcher import sync_bnet_install_status
-        sync_bnet_install_status()
+        from .battle_net import resync_installed
+        resync_installed()
 
     def on_shutdown(self):
-        from .watcher import stop_periodic_sync, stop_bnet_watcher
-        stop_periodic_sync()
+        from .watcher import stop_bnet_watcher
         stop_bnet_watcher()
 
     def on_uninstall(self):
-        from .battle_net import clear_bnet_tokens
-        clear_bnet_tokens()
-        from config import CONFIG_PATH, load_config, _save_config_data
-        cfg = load_config() or {}
-        cfg.pop('battle_net_credentials', None)
-        _save_config_data(cfg)
+        from . import account
+        account.clear()
 
     def launch_game(self, appid):
         import time
         from database import get_db, ts_to_date, update_game_data
+        from . import catalog
 
         db  = get_db()
         row = db.execute(
             "SELECT platform_id, installed FROM games WHERE appid = ?", (appid,)
         ).fetchone()
         db.close()
-
         if not row:
             return {'status': 'error', 'message': 'Battle.net game not found'}
 
-        product_code = (row['platform_id'] or '').strip()
-        if not product_code:
-            return {'status': 'error', 'message': 'Game has no product code — try re-syncing'}
+        code = (row['platform_id'] or '').strip()
+        if not code:
+            return {'status': 'error', 'message': 'Game has no product code -- try re-syncing'}
+        game = catalog.by_code(code)
+        code = game['code'] if game else code
 
-        slug = _LAUNCH_SLUGS.get(product_code, product_code)
-        url  = f'battlenet://{slug}'
+        if sys.platform == 'win32':
+            try:
+                if row['installed']:
+                    native = _find_native_launcher()
+                    if native:
+                        import subprocess
+                        subprocess.Popen([native, f'--exec=launch {code}'])
+                    else:
+                        os.startfile(f'battlenet://{code}')
+                else:
+                    os.startfile(f'battlenet://{code}')
+            except Exception as e:
+                return {'status': 'error', 'message': f'Launch failed: {e}'}
+        else:
+            prefix, wine_bin = _launcher_config()
+            if not prefix:
+                return {'status': 'error',
+                        'message': 'Battle.net not configured. Open Plugins -> Manage to set up the launcher.'}
+            try:
+                if row['installed']:
+                    _launch_via_client(prefix, wine_bin, code)
+                else:
+                    # Not installed -- open the client to the game's page so the
+                    # user can install it. battlenet://<code> only *selects* the
+                    # game, it doesn't start a download or a play session.
+                    from runners.wine import launch_protocol_url
+                    launch_protocol_url(prefix, f'battlenet://{code}', wine_bin=wine_bin,
+                                        env_extra={'WINEDEBUG': '-all'})
+            except RuntimeError as e:
+                return {'status': 'error', 'message': str(e)}
+            except Exception as e:
+                return {'status': 'error', 'message': f'Launch failed: {e}'}
 
+        if row['installed']:
+            now = int(time.time())
+            update_game_data(appid, last_played=now)
+            return {'status': 'success', 'last_played': ts_to_date(now)}
+        return {'status': 'success'}
+
+    def uninstall_game(self, appid):
+        from database import get_db
+        from . import uninstall as _uninstall
+
+        db  = get_db()
+        row = db.execute(
+            "SELECT platform_id, name, install_path, installed FROM games WHERE appid = ?",
+            (appid,),
+        ).fetchone()
+        db.close()
+        if not row:
+            return {'status': 'error', 'message': 'Battle.net game not found'}
+        if not row['installed']:
+            return {'status': 'error', 'message': 'That game is not installed.'}
+
+        if sys.platform == 'win32':
+            import subprocess
+            exe, args = _uninstall.find_command_native(row['install_path'], row['name'])
+            if not exe:
+                return {'status': 'error',
+                        'message': 'Could not find the uninstaller -- remove it from the Battle.net client instead.'}
+            try:
+                subprocess.Popen([exe] + args)
+            except Exception as e:
+                return {'status': 'error', 'message': f'Uninstall failed: {e}'}
+            return {'status': 'success'}
+
+        prefix, wine_bin = _launcher_config()
+        if not prefix:
+            return {'status': 'error', 'message': 'Battle.net launcher is not configured.'}
+        exe, args = _uninstall.find_command(prefix, row['install_path'], row['name'])
+        if not exe:
+            return {'status': 'error',
+                    'message': 'Could not find the uninstaller -- remove it from the Battle.net client instead.'}
         try:
-            if sys.platform == 'win32':
-                os.startfile(url)
-            else:  # Linux — Wine (no native Battle.net for Linux/macOS)
-                import json
-                from config import CONFIG_PATH
-                try:
-                    with open(CONFIG_PATH, 'r') as f:
-                        cfg = json.load(f)
-                except Exception:
-                    cfg = {}
-                launcher_cfg = cfg.get('launchers', {}).get('battle_net', {})
-                prefix   = launcher_cfg.get('prefix', '').strip()
-                wine_bin = launcher_cfg.get('wine_bin', '').strip() or None
+            from runners.wine import run_in_prefix
+            run_in_prefix(prefix, exe, args=args, wine_bin=wine_bin,
+                          env_extra={'WINEDEBUG': '-all'})
+        except RuntimeError as e:
+            return {'status': 'error', 'message': str(e)}
+        except Exception as e:
+            return {'status': 'error', 'message': f'Uninstall failed: {e}'}
+        return {'status': 'success'}
 
-                if not prefix:
-                    return {
-                        'status':  'error',
-                        'message': 'Battle.net not configured. Open Plugins → Manage to set up Wine.',
-                    }
-                from runners.wine import launch_protocol_url
-                launch_protocol_url(prefix, url, wine_bin=wine_bin, env_extra={'WINEDEBUG': '-all'})
+    def start_launcher(self):
+        """Open Battle.net with no specific game."""
+        if sys.platform == 'win32':
+            native = _find_native_launcher()
+            if not native:
+                return {'status': 'error', 'message': 'Battle.net is not installed'}
+            try:
+                os.startfile(native)
+            except Exception as e:
+                return {'status': 'error', 'message': f'Launch failed: {e}'}
+            return {'status': 'success'}
+
+        prefix, wine_bin = _launcher_config()
+        if not prefix:
+            return {'status': 'error',
+                    'message': 'Battle.net not configured. Open Plugins -> Manage to set up the launcher.'}
+        exe = _find_launcher_exe(prefix)
+        if not exe:
+            return {'status': 'error', 'message': 'Battle.net.exe not found in the prefix -- reinstall the launcher.'}
+        try:
+            from runners.wine import run_in_prefix
+            run_in_prefix(prefix, exe, wine_bin=wine_bin, env_extra={'WINEDEBUG': '-all'})
         except RuntimeError as e:
             return {'status': 'error', 'message': str(e)}
         except Exception as e:
             return {'status': 'error', 'message': f'Launch failed: {e}'}
-
-        if row['installed']:
-            now_ts = int(time.time())
-            update_game_data(appid, last_played=now_ts)
-            return {'status': 'success', 'last_played': ts_to_date(now_ts)}
-
         return {'status': 'success'}
 
     def launcher_status(self):
         if sys.platform == 'win32':
-            native = _find_native_launcher()
-            if native:
-                return {'available': True, 'detail': 'Battle.net launcher detected'}
-            return {'available': False, 'detail': 'Battle.net not installed'}
+            return ({'available': True, 'detail': 'Battle.net launcher detected'}
+                    if _find_native_launcher()
+                    else {'available': False, 'detail': 'Battle.net not installed'})
 
-        import json
-        from config import CONFIG_PATH
-        try:
-            with open(CONFIG_PATH, 'r') as f:
-                cfg = json.load(f)
-        except Exception:
-            cfg = {}
-
-        launcher_cfg = cfg.get('launchers', {}).get('battle_net', {})
-        prefix   = launcher_cfg.get('prefix', '').strip()
-        wine_bin = launcher_cfg.get('wine_bin', '').strip()
-
+        prefix, wine_bin = _launcher_config()
         from runners.wine import find_wine_binary
-        if not wine_bin:
-            wine_bin = find_wine_binary()
-
-        if not wine_bin:
+        if not (wine_bin or find_wine_binary()):
             return {'available': False, 'detail': 'No Wine binary found'}
         if not prefix:
             return {'available': False, 'detail': 'Wine prefix not configured'}
         if not os.path.isdir(prefix):
             return {'available': False, 'detail': f'Prefix not found: {prefix}'}
-
-        # Blizzard's installer only lays down the Agent bootstrapper unattended;
-        # Battle.net.exe itself is downloaded by the Agent on first run, so either
-        # file present means the launcher is ready to be launched.
-        for _dirpath, _dirs, files in os.walk(prefix):
-            if 'Battle.net.exe' in files or 'Agent.exe' in files:
-                return {'available': True, 'detail': 'Launcher ready'}
-
-        return {
-            'available': False,
-            'detail': 'Battle.net.exe not found in prefix — install Battle.net in Wine',
-        }
+        if _find_launcher_exe(prefix):
+            return {'available': True, 'detail': 'Launcher ready'}
+        return {'available': False,
+                'detail': 'Battle.net.exe not found in prefix -- reinstall the launcher'}
 
     def js_api(self):
         return {
-            'uninstall_url':  None,
+            'uninstall_url':  '/api/battle_net/uninstall/{appid}',
             'scrape_url':     '/api/battle_net/scrape-single/{appid}',
             'scrape_method':  'POST',
             'store_url':      None,
@@ -193,80 +291,101 @@ class BattleNetPlugin:
         }
 
     def manage_ui(self):
-        native = _find_native_launcher()
-        if native:
+        if sys.platform == 'win32':
             launcher_section = {
                 'title': 'Launcher',
-                'items': [
-                    {'type': 'text', 'content': 'Battle.net is installed — no additional setup needed.'},
-                ],
-            }
-        elif sys.platform == 'win32':
-            launcher_section = {
-                'title': 'Launcher',
-                'items': [
-                    {'type': 'text', 'content': 'Battle.net is not installed.'},
-                    {'type': 'button', 'label': 'Download Battle.net', 'action': {
-                        'type': 'open_url', 'url': 'https://www.blizzard.com/en-us/apps/battle.net/desktop',
-                    }},
-                ],
+                'items': (
+                    [{'type': 'text', 'content': 'Battle.net is installed.'},
+                     {'type': 'button', 'label': 'Start Launcher', 'action': {
+                         'type': 'call', 'fn': 'battlenetStartLauncher',
+                     }}]
+                    if _find_native_launcher() else
+                    [{'type': 'text', 'content': 'Battle.net is not installed.'},
+                     {'type': 'button', 'label': 'Download Battle.net', 'action': {
+                         'type': 'open_url',
+                         'url': 'https://www.blizzard.com/apps/battle.net/desktop'}}]
+                ),
             }
         else:
-            launcher_section = {
-                'title': 'Launcher',
-                'items': [
-                    {'type': 'text', 'content': 'Set the Wine binary and prefix where Battle.net is installed.'},
-                    {'type': 'launcher_config'},
-                ],
-            }
+            items = [
+                {'type': 'text', 'content':
+                    'Install the Battle.net launcher into a Wine prefix, then sign in to it '
+                    'once so PlayDate can read your library from its local files.'},
+                {'type': 'launcher_config'},
+            ]
+            _prefix, _wine_bin = _launcher_config()
+            if _prefix and _find_launcher_exe(_prefix):
+                items.append({'type': 'text', 'content': 'Battle.net is installed.'})
+                items.append({'type': 'button', 'label': 'Start Launcher', 'action': {
+                    'type': 'call', 'fn': 'battlenetStartLauncher',
+                }})
+                items.append({'type': 'button', 'label': 'Open Folder', 'action': {
+                    'type': 'call', 'fn': 'battlenetOpenFolder',
+                }})
+                items.append({'type': 'status_output', 'key': 'folder'})
+            launcher_section = {'title': 'Launcher', 'items': items}
 
         return {
             'sections': [
                 {
-                    'title': 'API Credentials',
+                    'title': 'Library',
                     'items': [
                         {'type': 'text', 'content':
-                            'Create a free API client at '
-                            '<a href="https://develop.battle.net" target="_blank">develop.battle.net</a>. '
-                            'Set the redirect URI to <code>http://localhost/</code>.'},
-                        {'type': 'info_endpoint', 'endpoint': '/api/battle_net/credentials-status'},
-                        {'type': 'button', 'label': 'Enter Client Credentials',
-                         'action': {'type': 'call', 'fn': 'battlenetSetCredentials'}},
+                            "PlayDate can read your library two ways. Without an account connected, it "
+                            "reads the launcher's own local files: installed games always, plus paid "
+                            "games it's confident about from the account's cached licenses (Call of Duty "
+                            'titles only count once installed -- Blizzard grants free-access licenses '
+                            'that look identical to a purchase locally). Connecting the account below '
+                            "adds Blizzard's own owned-games list on top, including games not yet "
+                            'installed, plus real purchase dates.'},
+                        {'type': 'info_endpoint', 'endpoint': '/api/battle_net/status'},
+                        {'type': 'button', 'label': 'Sync Library',
+                         'action': {'type': 'call', 'fn': 'battlenetSync'}},
+                        {'type': 'status_output', 'key': 'main'},
                     ],
                 },
                 {
-                    'title': 'Account',
+                    'title': 'Account (optional)',
                     'auth': {
-                        'endpoint': '/api/battle_net/status',
+                        'endpoint': '/api/battle_net/account/status',
                         'disconnected': [
-                            {'type': 'text', 'content': 'Connect your Battle.net account after entering credentials above.'},
+                            {'type': 'text', 'content':
+                                'Connect your Battle.net account for the authoritative owned-games '
+                                "list -- covers games you haven't installed and resolves Call of Duty "
+                                'ownership the local scan can only guess at. No developer account or API '
+                                'key needed.'},
                             {'type': 'button', 'label': 'Connect Battle.net Account', 'action': {
                                 'type': 'oauth_popup',
                                 'title': 'Connect Battle.net Account',
-                                'url_endpoint': '/api/battle_net/auth-url',
-                                'callback_endpoint': '/api/battle_net/callback',
-                                'redirect_pattern': 'localhost',
+                                'url_endpoint': '/api/battle_net/account/auth-url',
+                                'callback_endpoint': '/api/battle_net/account/callback',
+                                # Confirmed live 2026-09-04 via playdate.log's page-loaded
+                                # trail: /api/logout kicks off a real OAuth2 code flow
+                                # (oauth.battle.net -> us.account.battle.net/login/... ->
+                                # back to account.battle.net/callback/oauth2/...), landing
+                                # on the bare root https://account.battle.net/ once signed
+                                # in -- not /overview. A plain 'account.battle.net' pattern
+                                # matched the login FORM page too (us.account.battle.net
+                                # contains that substring) and closed the popup before any
+                                # typing; '://account.battle.net/' only matches the scheme
+                                # directly followed by the bare host+root, which the
+                                # us.account.battle.net login/password pages never are.
+                                'redirect_pattern': '://account.battle.net/',
+                                'cookie_name': '*',
                                 'code_js': '',
                                 'instructions': [
-                                    'Click <strong>Open Battle.net Login</strong> — your browser opens the Blizzard login page.',
-                                    'Log in to your Battle.net account.',
-                                    'After login, your browser will redirect to <code>http://localhost/</code> (which may show an error — that\'s expected).',
-                                    'Copy the full URL from your browser\'s address bar and paste it below.',
+                                    'Click <strong>Open Battle.net Login</strong> and log in to your Battle.net account.',
+                                    'The window closes itself once you\'re signed in.',
                                 ],
-                                'input_placeholder': 'Paste the redirect URL (http://localhost/?code=...)',
                                 'open_label': 'Open Battle.net Login',
-                                'submit_label': 'Connect',
                             }},
                         ],
                         'connected': [
                             {'type': 'connected_label'},
-                            {'type': 'button', 'label': 'Sync Library',
-                             'action': {'type': 'call', 'fn': 'battlenetSync'}},
                             {'type': 'button', 'label': 'Disconnect', 'variant': 'muted', 'action': {
-                                'type': 'post', 'endpoint': '/api/battle_net/disconnect',
+                                'type': 'post', 'endpoint': '/api/battle_net/account/disconnect',
                                 'on_success': 'refresh_auth',
                             }},
-                            {'type': 'status_output', 'key': 'main'},
                         ],
                     },
                 },
