@@ -280,12 +280,15 @@ def _merge_account(local_games, account_games):
 
 def resync_installed():
     """Refresh installed flags / paths for every Battle.net game from
-    product.db. Called by bulk rescrape, restore, and the install watcher."""
+    product.db. Called by bulk rescrape, restore, and the install watcher.
+
+    An unconfigured / absent prefix means nothing on this platform can be
+    installed, so stale installed=1 rows still get cleared (e.g. the prefix
+    was deleted after a game was installed -- otherwise the badge and Open
+    Folder disagree forever, since nothing else downgrades the flag)."""
     from database import get_db
 
-    if not is_configured():
-        return
-    installed = _installed_by_code()
+    installed = _installed_by_code() if is_configured() else {}
 
     db = get_db()
     try:
