@@ -127,6 +127,26 @@ def check_authenticated(session):
         return False
 
 
+def check_connection():
+    """True if account.battle.net still treats the saved cookies as logged in,
+    False if not, None if the request failed (offline). Unlike check_authenticated,
+    a network error is not reported as 'logged out'."""
+    if not is_connected():
+        return False
+    session = get_valid_session()
+    if not session:
+        return False
+    try:
+        resp = session.get(f'{BASE}/api/', timeout=10)
+        if resp.status_code in (401, 403):
+            return False
+        return bool(resp.json().get('authenticated'))
+    except requests.RequestException:
+        return None
+    except ValueError:
+        return None
+
+
 def _fetch_battletag(session):
     try:
         resp = session.get(f'{BASE}/api/details', timeout=10)

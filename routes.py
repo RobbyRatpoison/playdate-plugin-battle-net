@@ -74,8 +74,15 @@ def bnet_account_callback():
 
 @bp.route('/account/status')
 def bnet_account_status():
-    from .account import is_connected, get_display_name
-    return jsonify({'connected': is_connected(), 'username': get_display_name()})
+    import plugins
+    from .account import is_connected, get_display_name, check_connection
+    connected = is_connected()
+    expired   = False
+    verify    = getattr(plugins, 'verify_connection', None)  # absent on older cores
+    if connected and verify and verify('battle_net', check_connection) is False:
+        connected, expired = False, True
+    return jsonify({'connected': connected, 'expired': expired,
+                    'username': get_display_name() if connected else None})
 
 
 @bp.route('/account/disconnect', methods=['POST'])
