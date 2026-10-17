@@ -99,6 +99,17 @@ class BattleNetPlugin:
     platform = 'battle_net'
     label    = 'Battle.net'
 
+    def sync(self):
+        from .battle_net import start_library_sync
+        return start_library_sync()
+
+    def sync_status(self):
+        """Outcome of the last library sync, for core's startup sync (see PLUGINS.md)."""
+        from .battle_net import get_sync_state, is_configured
+        st = get_sync_state()
+        return {'running': bool(st.get('running')), 'error': st.get('error'),
+                'connected': bool(is_configured())}
+
     def register(self, app):
         from .routes import bp
         app.register_blueprint(bp)

@@ -1,7 +1,11 @@
 {
     "id": "battle_net",
     "name": "Battle.net",
-    "version": "2026.10.1",
+    "version": "2026.10.2",
+    "release_note": {
+        "version": "2026.10.2",
+        "text": "New option on the plugin's card: sync your library when PlayDate starts."
+    },
     "min_core_version": "1.10.2",
     "platform": "battle_net",
     "author": "RobbyRatpoison",
@@ -30,9 +34,5 @@
     },
     "notes": {
         "linux": "Library sync, install, launch, and uninstall all confirmed working via Wine. Local sync (installed games + owned paid games) needs no login; connecting the account adds the authoritative owned list on top."
-    },
-    "release_note": {
-        "version": "2026.10.1",
-        "text": "The plugin card shows Connect again when Battle.net rejects your saved login."
     }
 }
